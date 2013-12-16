@@ -3,6 +3,7 @@
 module FRP.Reactant where
 
 import Control.Applicative
+import Control.Monad
 import Data.Monoid
 
 -- |
@@ -57,6 +58,11 @@ reactive (Event e) =
 class (Monad m) => MonadReactant m t where
   -- |
   trigger :: a -> m (Event t a)
+  -- |
+  triggers ::[a] -> m (Event t a)
+  triggers t = foldM fastMerge never $ mapM trigger t
+    where
+      fastMerge (Event a) (Event x) = return $ Event (a ++ x)
 
 -- |
 newtype Reactant t a = Reactant { runReactant :: t -> (a,t) }
@@ -64,8 +70,8 @@ newtype Reactant t a = Reactant { runReactant :: t -> (a,t) }
 instance Monad (Reactant t) where
   return a = Reactant $ \t -> (a,t)
   r >>= f = Reactant $ \t ->
-    let (a,_) = runReactant r t
-    in runReactant (f a) t
+    let (a,t0) = runReactant r t
+    in runReactant (f a) t0
 
 instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
   trigger a = Reactant $ \t -> (Event [(t,a)],succ t)
