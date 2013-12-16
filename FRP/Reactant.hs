@@ -1,3 +1,5 @@
+{-# LANGUAGE MultiParamTypeClasses, FlexibleInstances #-}
+
 module FRP.Reactant where
 
 import Control.Applicative
@@ -52,8 +54,18 @@ reactive (Event e) =
           snd . head . dropWhile (\(t0,_) -> t <= t0) $ e
 
 -- |
-class MonadReactant m where
+class (Monad m) => MonadReactant m t where
   -- |
   trigger :: a -> m (Event t a)
 
+-- |
+newtype Reactant t a = Reactant { runReactant :: t -> (a,t) }
 
+instance Monad (Reactant t) where
+  return a = Reactant $ \t -> (a,t)
+  r >>= f = Reactant $ \t ->
+    let (a,_) = runReactant r t
+    in runReactant (f a) t
+
+instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
+  trigger a = Reactant $ \t -> (Event [(t,a)],succ t)
