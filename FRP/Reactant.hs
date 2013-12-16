@@ -4,8 +4,8 @@ module FRP.Reactant where
 
 import Control.Applicative
 import Control.Monad
-import Data.Monoid
 import Control.Monad.State
+import Data.Monoid
 
 -- |
 newtype Reactive t a = Reactive (t -> a) deriving (Functor, Applicative)
