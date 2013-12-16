@@ -60,7 +60,7 @@ class (Monad m) => MonadReactant m t where
   trigger :: a -> m (Event t a)
   -- |
   triggers ::[a] -> m (Event t a)
-  triggers t = foldM fastMerge never $ mapM trigger t
+  triggers t = mapM trigger t >>= foldM fastMerge never
     where
       fastMerge (Event a) (Event x) = return $ Event (a ++ x)
 
