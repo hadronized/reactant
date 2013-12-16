@@ -3,15 +3,17 @@
 module FRP.Reactant where
 
 import Control.Applicative
+import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.State
+import Control.Monad.Trans.Reader
 import Data.Monoid
 
 -- |
 newtype Reactive t a = Reactive (t -> a) deriving (Functor, Applicative)
 
 -- |
-newtype Event t a = Event [(t,a)] deriving Functor
+newtype Event t a = Event [(t,a)] deriving (Functor)
 
 -- |Event that never occurs.
 never :: Event t a
@@ -56,7 +58,31 @@ class (Monad m) => MonadReactant m t where
       fastMerge (Event a) (Event x) = return $ Event (a ++ x)
 
 -- |
-newtype Reactant t a = Reactant { runReactant :: State t a } deriving Monad
+newtype Reactant t a = Reactant { unReactant :: State t a } deriving (Monad)
 
 instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
   trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
+
+-- |
+runReactant :: (Ord t, Enum t) => t -> Reactant t a -> a
+runReactant start r = evalState (unReactant r) start
+
+-- |
+newtype ReactantIO t a = ReactantIO { unReactantIO :: ReaderT (TVar t) IO a } deriving (Monad,MonadIO)
+
+instance (Ord t, Enum t) => MonadReactant (ReactantIO t) t where
+  trigger a = ReactantIO $ do
+    g <- ask
+    t <- lift . atomically $ do
+      t <- readTVar g
+      writeTVar g (succ t)
+      return t
+    return $ Event [(t,a)]
+
+-- |
+runReactantIO :: (Ord t, Enum t) => t -> ReactantIO t a -> IO a
+runReactantIO start r = atomically (newTVar start) >>= runReaderT (unReactantIO r)
+
+test :: ReactantIO t ()
+test = do
+  liftIO $ putStrLn "lol"
