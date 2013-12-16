@@ -1,26 +1,17 @@
-{-# LANGUAGE MultiParamTypeClasses, FlexibleInstances #-}
+{-# LANGUAGE DeriveFunctor, MultiParamTypeClasses, FlexibleInstances, GeneralizedNewtypeDeriving #-}
 
 module FRP.Reactant where
 
 import Control.Applicative
 import Control.Monad
 import Data.Monoid
+import Control.Monad.State
 
 -- |
-newtype Reactive t a = Reactive (t -> a)
-
-instance Functor (Reactive t) where
-  fmap f (Reactive g) = Reactive (f . g)
-
-instance Applicative (Reactive t) where
-  pure = Reactive . const
-  Reactive f <*> Reactive g = Reactive $ \t -> f t (g t)
+newtype Reactive t a = Reactive (t -> a) deriving (Functor, Applicative)
 
 -- |
-newtype Event t a = Event [(t,a)]
-
-instance Functor (Event t) where
-  fmap f (Event e) = Event . map (fmap f) $ e
+newtype Event t a = Event [(t,a)] deriving Functor
 
 -- |Event that never occurs.
 never :: Event t a
@@ -65,13 +56,7 @@ class (Monad m) => MonadReactant m t where
       fastMerge (Event a) (Event x) = return $ Event (a ++ x)
 
 -- |
-newtype Reactant t a = Reactant { runReactant :: t -> (a,t) }
-
-instance Monad (Reactant t) where
-  return a = Reactant $ \t -> (a,t)
-  r >>= f = Reactant $ \t ->
-    let (a,t0) = runReactant r t
-    in runReactant (f a) t0
+newtype Reactant t a = Reactant { runReactant :: State t a } deriving Monad
 
 instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
-  trigger a = Reactant $ \t -> (Event [(t,a)],succ t)
+  trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
