@@ -1,4 +1,5 @@
-{-# LANGUAGE DeriveFunctor, MultiParamTypeClasses, FlexibleInstances, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveFunctor, MultiParamTypeClasses, FlexibleInstances
+           , GeneralizedNewtypeDeriving #-}
 
 module FRP.Reactant where
 
@@ -70,12 +71,12 @@ newtype Reactant t a = Reactant {
     unReactant :: State t a
   } deriving (Monad)
 
-instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
+instance (Enum t) => MonadReactant (Reactant t) t where
   now       = Reactant get
   trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
 
 -- |
-runReactant :: (Ord t, Enum t) => t -> Reactant t a -> a
+runReactant :: t -> Reactant t a -> a
 runReactant start r = evalState (unReactant r) start
 
 -- |
@@ -83,7 +84,7 @@ newtype ReactantIO t a = ReactantIO {
     unReactantIO :: ReaderT (TVar t) IO a
   } deriving (Monad,MonadIO)
 
-instance (Ord t, Enum t) => MonadReactant (ReactantIO t) t where
+instance (Enum t) => MonadReactant (ReactantIO t) t where
   now = ReactantIO $ ask >>= lift . atomically . readTVar
   trigger a = ReactantIO $ do
     g <- ask
@@ -94,6 +95,6 @@ instance (Ord t, Enum t) => MonadReactant (ReactantIO t) t where
     return $ Event [(t,a)]
 
 -- |
-runReactantIO :: (Ord t, Enum t) => t -> ReactantIO t a -> IO a
+runReactantIO :: t -> ReactantIO t a -> IO a
 runReactantIO start r =
     atomically (newTVar start) >>= runReaderT (unReactantIO r)
