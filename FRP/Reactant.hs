@@ -60,7 +60,7 @@ class (Monad m) => MonadReactant m t where
   -- |
   trigger :: a -> m (Event t a)
   -- |
-  triggers ::[a] -> m (Event t a)
+  triggers :: [a] -> m (Event t a)
   triggers t = mapM trigger t >>= foldM fastMerge never
     where
       fastMerge (Event a) (Event x) = return $ Event (a ++ x)
@@ -71,7 +71,7 @@ newtype Reactant t a = Reactant {
   } deriving (Monad)
 
 instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
-  now       = Reactant . state $ \t -> (t,t)
+  now       = Reactant get
   trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
 
 -- |
@@ -97,17 +97,3 @@ instance (Ord t, Enum t) => MonadReactant (ReactantIO t) t where
 runReactantIO :: (Ord t, Enum t) => t -> ReactantIO t a -> IO a
 runReactantIO start r =
     atomically (newTVar start) >>= runReaderT (unReactantIO r)
-
-{-
-test :: ReactantIO t ()
-test = do
-    -- launch a thread that periodically reads something, and modify it
-    -- with some events
-    events <- lift . atomically $ newTVar never
-    runThread events
-    loop events
-  where
-    runThread events = void . forkIO $ do
-      
-      threadDelay
--}
