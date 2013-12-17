@@ -9,6 +9,9 @@ import Control.Monad.State
 import Control.Monad.Trans.Reader
 import Data.Monoid
 
+-- for test only
+import Control.Concurrent
+
 -- |
 newtype Reactive t a = Reactive (t -> a) deriving (Functor, Applicative)
 
@@ -50,6 +53,11 @@ reactive (Event e) =
 -- |
 class (Monad m) => MonadReactant m t where
   -- |
+  now :: m t
+  -- |
+  at :: Reactive t a -> t -> m a
+  at (Reactive r) t = return $ r t
+  -- |
   trigger :: a -> m (Event t a)
   -- |
   triggers ::[a] -> m (Event t a)
@@ -63,6 +71,7 @@ newtype Reactant t a = Reactant {
   } deriving (Monad)
 
 instance (Ord t, Enum t) => MonadReactant (Reactant t) t where
+  now       = Reactant . state $ \t -> (t,t)
   trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
 
 -- |
@@ -75,6 +84,7 @@ newtype ReactantIO t a = ReactantIO {
   } deriving (Monad,MonadIO)
 
 instance (Ord t, Enum t) => MonadReactant (ReactantIO t) t where
+  now = ReactantIO $ ask >>= lift . atomically . readTVar
   trigger a = ReactantIO $ do
     g <- ask
     t <- lift . atomically $ do
@@ -88,6 +98,16 @@ runReactantIO :: (Ord t, Enum t) => t -> ReactantIO t a -> IO a
 runReactantIO start r =
     atomically (newTVar start) >>= runReaderT (unReactantIO r)
 
+{-
 test :: ReactantIO t ()
 test = do
-  liftIO $ putStrLn "lol"
+    -- launch a thread that periodically reads something, and modify it
+    -- with some events
+    events <- lift . atomically $ newTVar never
+    runThread events
+    loop events
+  where
+    runThread events = void . forkIO $ do
+      
+      threadDelay
+-}
