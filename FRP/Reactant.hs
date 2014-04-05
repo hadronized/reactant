@@ -39,7 +39,7 @@ mconcatE (Event e) = Event $ foldr f [] e
 
 -- |Filter an events stream, only saving those who satisfy the predicate.
 filterE :: (a -> Bool) -> Event t a -> Event t a
-filterE pred (Event e) = Event $ filter (pred . snd) e
+filterE pred (Event e) = Event (filter (pred . snd) e)
 
 -- |Accumulate a value in an events stream.
 accumE :: a -> Event t (a -> a) -> Event t a
@@ -58,7 +58,7 @@ reactive (Event e) =
 -- |A reactant. It’s basically a monad that embeds time generation.
 --
 -- Minimal definition: `now` and `trigger`.
-class (Monad m) => MonadReactant m t where
+class (Monad m) => MonadReactant t m where
   -- |
   now :: m t
   -- |
@@ -75,7 +75,7 @@ newtype Reactant t a = Reactant {
     unReactant :: State t a
   } deriving (Monad)
 
-instance (Enum t) => MonadReactant (Reactant t) t where
+instance (Enum t) => MonadReactant t (Reactant t) where
   now       = Reactant get
   trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
 
@@ -89,7 +89,7 @@ newtype ReactantIO t a = ReactantIO {
     unReactantIO :: ReaderT (TVar t) IO a
   } deriving (Monad,MonadIO)
 
-instance (Enum t) => MonadReactant (ReactantIO t) t where
+instance (Enum t) => MonadReactant t (ReactantIO t) where
   now = ReactantIO $ ask >>= lift . atomically . readTVar
   trigger a = ReactantIO $ do
     g <- ask
