@@ -1,117 +1,46 @@
-{-# LANGUAGE DeriveFunctor, DeriveFoldable, MultiParamTypeClasses
-           , FlexibleInstances, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveFunctor, GeneralizedNewtypeDeriving #-}
 
 module FRP.Reactant where
 
 import Control.Applicative
-import Control.Concurrent.STM
 import Control.Monad
-import Control.Monad.State
-import Control.Monad.Trans.Reader
 import Data.Monoid
 
--- |A time-varying value.
-newtype Reactive t a = Reactive (t -> a) deriving (Functor, Applicative)
+newtype Reactive e a = Reactive { unReactive :: e -> a } deriving (Functor,Applicative,Monad)
 
--- |An events stream.
-newtype Event t a = Event [(t,a)] deriving (Functor, Monoid)
+newtype Event e a = Event { runEvent :: e -> Maybe a } deriving (Functor)
 
--- |Event that never occurs.
-never :: Event t a
-never = Event []
+instance Applicative (Event e) where
+  pure = Event . const . Just
+  Event a <*> Event f = Event $ \e -> a e <*> f e
 
--- |Merge two events streams.
-merge :: (Ord t) => Event t a -> Event t a -> Event t a
-merge (Event e0) (Event e1) = Event $ mergeList e0 e1
-  where
-    mergeList a  [] = a
-    mergeList [] b = b
-    mergeList a@((t0,x):xs) b@((t1,y):ys)
-      | t0 <= t1  = (t0,x) : mergeList xs b
-      | otherwise = (t1,y) : mergeList a ys
+instance Monad (Event e) where
+  return = pure
+  Event a >>= f =
+      Event $ \e -> case a e of
+        Just x  -> runEvent (f x) e
+        Nothing -> Nothing
 
--- |Concat a monoidal events stream.
-mconcatE :: (Monoid a) => Event t a -> Event t a
-mconcatE (Event e) = Event $ foldr f [] e
-  where
-    f x       []        = [x]
-    f (lt,a) ((_,b):xs) = xs ++ [(lt,b <> a)]
+instance MonadPlus (Event e) where
+  mzero = mempty
+  mplus = mappend
 
--- |Filter an events stream, only saving those who satisfy the predicate.
-filterE :: (a -> Bool) -> Event t a -> Event t a
-filterE pred (Event e) = Event (filter (pred . snd) e)
+instance Monoid (Event e a) where
+  mempty = Event (const Nothing)
+  Event e0 `mappend` Event e1 = Event $ \e -> e0 e <|> e1 e
 
--- |Accumulate a value in an events stream.
-accumE :: a -> Event t (a -> a) -> Event t a
-accumE i e = fmap ($ i) e
+never :: Event e a
+never = mempty
 
--- |Build a time-varying value from an events stream.
-reactive :: (Ord t) => Event t a -> Reactive t a
-reactive (Event e) =
-    Reactive $ \t ->
-      let lastE = last e
-      in if t >= fst lastE then
-        snd lastE
-        else
-          snd . head . dropWhile (\(t0,_) -> t <= t0) $ e
+always :: a -> Event e a
+always = pure
 
--- |A reactant. It’s basically a monad that embeds time generation.
---
--- Minimal definition: `now` and `trigger`.
-class (Monad m) => MonadReactant t m where
-  -- |
-  now :: m t
-  -- |
-  at :: Reactive t a -> t -> m a
-  at (Reactive r) t = return $ r t
-  -- |
-  trigger :: a -> m (Event t a)
-  -- |
-  triggers :: [a] -> m (Event t a)
-  triggers t = mconcat `liftM` mapM trigger t
+reactive :: a -> Event e a -> Reactive e a
+reactive a (Event ev) = Reactive $ \e -> maybe a id (ev e)
 
--- |A pure reactant.
-newtype Reactant t a = Reactant {
-    unReactant :: State t a
-  } deriving (Monad)
+untilR :: Reactive e a -> Event e (Reactive e a) -> Reactive e a
+untilR (Reactive initial) (Event sw) =
+    Reactive $ \e -> case sw e of
+      Just new -> unReactive new e
+      Nothing  -> initial e
 
-instance (Enum t) => MonadReactant t (Reactant t) where
-  now       = Reactant get
-  trigger a = Reactant . state $ \t -> (Event [(t,a)],succ t)
-
--- |Run a pure reactant with a an initial time. If your time is in the class
--- `Num`, you may want to pass `0` as initial value.
-runReactant :: t -> Reactant t a -> a
-runReactant start r = evalState (unReactant r) start
-
--- |A reactant in `IO`.
-newtype ReactantIO t a = ReactantIO {
-    unReactantIO :: ReaderT (TVar t) IO a
-  } deriving (Monad,MonadIO)
-
-instance (Enum t) => MonadReactant t (ReactantIO t) where
-  now = ReactantIO $ ask >>= lift . atomically . readTVar
-  trigger a = ReactantIO $ do
-    g <- ask
-    t <- lift . atomically $ do
-      t <- readTVar g
-      writeTVar g (succ t)
-      return t
-    return $ Event [(t,a)]
-
--- |Run reactant from IO with a an initial time. If your time is in the class
--- `Num`, you may want to pass `0` as initial value.
-runReactantIO :: t -> ReactantIO t a -> IO a
-runReactantIO start r =
-    atomically (newTVar start) >>= runReaderT (unReactantIO r)
-
--- should be place in tests/
-test :: ReactantIO Int ()
-test = do
-  e0 <- trigger (Endo $ (+2))
-  e1 <- trigger (Endo $ (*3))
-  let e = accumE 0 . fmap appEndo . mconcatE $ e0 <> e1 :: Event Int Int
-      r = reactive e
-  t <- now
-  v <- r `at` t
-  liftIO . putStrLn $ "value is " ++ show v
