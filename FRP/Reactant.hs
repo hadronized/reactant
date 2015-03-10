@@ -13,6 +13,7 @@ module FRP.Reactant where
 
 import Control.Applicative
 import Data.Monoid ( Monoid(..) )
+import Data.Profunctor ( Profunctor(..) )
 import Data.Semigroup ( Semigroup(..) )
 
 -- |@Rea t a@ is a /reactive 'a' value that may react to time 't'.
@@ -24,6 +25,11 @@ instance Applicative (Rea t) where
     (f',nf) <- stepRea f t
     (x',nx) <- stepRea x t
     return $ (f' x',nf <*> nx)
+
+instance Profunctor Rea where
+  dimap f g r = Rea $ \t -> do
+    (x,n) <- stepRea r (f t)
+    return (g x,dimap f g n)
 
 -- |'still' produces a value that doesn’t react to time and remains still
 -- forever.
