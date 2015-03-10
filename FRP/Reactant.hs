@@ -1,46 +1,149 @@
-{-# LANGUAGE DeriveFunctor, GeneralizedNewtypeDeriving #-}
+-- |@Rea t a@ is a /reactive/ 'a' value that may react to time 't'. If it
+-- doesn’t react to time, it’s considered as /inhibiting/ – see 'dead'.
+--
+-- Inhibiting is used when a reactive value is not responding to time anymore.
+-- You can make it respond again by *reviving* it – see 'revive' or '(~>)'.
+--
+-- 'Event t a' represents an /event stream/. Each event has an occurrence in
+-- time and can be reacted to. The simplest kind of reaction is to use them as
+-- behavior switches. You use a 'Rea t a' reactive value and switch to another
+-- 'Rea t a' reactive value when the given event occurs – see 'till'.
 
 module FRP.Reactant where
 
 import Control.Applicative
-import Control.Monad
-import Data.Monoid
+import Data.Monoid ( Monoid(..) )
+import Data.Semigroup ( Semigroup(..) )
 
-newtype Reactive e a = Reactive { unReactive :: e -> a } deriving (Functor,Applicative,Monad)
+-- |@Rea t a@ is a /reactive 'a' value that may react to time 't'.
+newtype Rea t a = Rea { stepRea :: t -> Maybe (a,Rea t a) } deriving (Functor)
 
-newtype Event e a = Event { runEvent :: e -> Maybe a } deriving (Functor)
+instance Applicative (Rea t) where
+  pure = still
+  f <*> x = Rea $ \t -> do
+    (f',nf) <- stepRea f t
+    (x',nx) <- stepRea x t
+    return $ (f' x',nf <*> nx)
 
-instance Applicative (Event e) where
-  pure = Event . const . Just
-  Event a <*> Event f = Event $ \e -> a e <*> f e
+-- |'still' produces a value that doesn’t react to time and remains still
+-- forever.
+--
+-- Synonym of 'pure'.
+still :: a -> Rea t a
+still a = let r = Rea . const $ return (a,r) in r
 
-instance Monad (Event e) where
-  return = pure
-  Event a >>= f =
-      Event $ \e -> case a e of
-        Just x  -> runEvent (f x) e
-        Nothing -> Nothing
+-- |'dead' is a reactive value that doesn’t react to time and doesn’t carry
+-- any value. It’s then /inhibiting/.
+--
+-- If you want that reactive value to produce again, you have to 'revive' it.
+-- See 'revive' or '(~>)' for further details.
+dead :: Rea t a
+dead = Rea (const Nothing)
 
-instance MonadPlus (Event e) where
-  mzero = mempty
-  mplus = mappend
+-- |'one a' pulses the value 'a' and inhibit forever.
+one :: a -> Rea t a
+one a = Rea $ \_ -> Just (a,dead)
 
-instance Monoid (Event e a) where
-  mempty = Event (const Nothing)
-  Event e0 `mappend` Event e1 = Event $ \e -> e0 e <|> e1 e
+-- |The identity reactive value. Produces the current time.
+now :: Rea t t
+now = Rea $ return . (,now)
 
-never :: Event e a
-never = mempty
+-- |Produces the 'a' value for the given period of time. Afterward, it
+-- inhibits forever.
+for :: (Num t,Ord t) => a -> t -> Rea t a
+for a duration = Rea $ \t -> do
+    (start,_) <- stepRea now t
+    stepRea (Rea $ forFrom start) t
+  where
+    forFrom start t
+      | t - start <= duration = Just (a,Rea $ forFrom start)
+      | otherwise = Nothing
 
-always :: a -> Event e a
+-- |'Event t a' is a stream of events occurring at 't' times and carrying 'a'
+-- values.
+newtype Event t a = Event { unEvent :: Rea t a } deriving (Applicative,Functor)
+
+instance Semigroup (Event t a) where
+  (<>) = mergeE
+
+instance Monoid (Event t a) where
+  mempty = never
+  mappend = (<>)
+
+-- |An event that won’t ever occur.
+never :: Event t a
+never = Event dead
+
+-- |@always a@ will always occur with 'a' carried.
+always :: a -> Event t a
 always = pure
 
-reactive :: a -> Event e a -> Reactive e a
-reactive a (Event ev) = Reactive $ \e -> maybe a id (ev e)
+-- |Produce an 'Event' that happens only once.
+once :: a -> Event t a
+once = Event . one
 
-untilR :: Reactive e a -> Event e (Reactive e a) -> Reactive e a
-untilR (Reactive initial) (Event sw) =
-    Reactive $ \e -> case sw e of
-      Just new -> unReactive new e
-      Nothing  -> initial e
+-- |Merge two events.
+mergeE :: Event t a -> Event t a -> Event t a
+mergeE a b = Event . Rea $ \t -> case stepRea (unEvent a) t of
+  Just (a',an) -> Just (a',unEvent $ mergeE (Event an) b)
+  Nothing -> stepRea (unEvent b) t
 
+-- |Forget the first few events.
+dropE :: Int -> Event t a -> Event t a
+dropE 0 e = e
+dropE n e = Event . Rea $ \t -> do
+  (_,en) <- stepRea (unEvent e) t
+  stepRea (unEvent . dropE (pred n) $ Event en) t
+
+-- |Forget the first event.
+initE :: Event t a -> Event t a
+initE = dropE 1
+
+-- |Check whether an 'Event' has happened yet. If so, @occurred e t@ gives
+-- the carried value of the 'Event' along with the next 'Event' in the
+-- stream. Otherwise, if no event has occurred, it produces 'Nothing'.
+occurred :: Event t a -> t -> Maybe (a,Event t a)
+occurred e t = Event <$$> stepRea (unEvent e) t
+
+-- |Build an 'Event' that carries the given value /at/ the given time.
+at :: (Ord t) => a -> t -> Event t a
+at a t = Event (Rea go)
+  where
+    go t'
+      | t' >= t = Just (a,unEvent never)
+      | otherwise = Nothing
+
+-- |Reactive value switch. 'till' takes the initial reactive value and
+-- produces it until the 'Event' occurs, afterwards the reactive value
+-- is switched with the one carried by the 'Event'.
+till :: Rea t a -> Event t (Rea t a) -> Rea t a
+till ini e = Rea go
+  where
+    go t = case occurred e t of
+      Just (next,_) -> stepRea next t
+      Nothing -> do
+        (x,_) <- stepRea ini t
+        return (x,till ini e)
+
+-- |Revive a reactive value. @a ~> b@ will produce 'a' until it starts
+-- /inhibiting/, afterwhile 'b' is used.
+(~>) :: Rea t a -> Rea t a -> Rea t a
+a ~> b = Rea $ \t -> case stepRea a t of
+  Just (x,a') -> Just (x,a' ~> b)
+  Nothing -> stepRea b t
+
+-- |Prefix version of '(~>)'.
+revive :: Rea t a -> Rea t a -> Rea t a
+revive = (~>)
+
+-- |@a >~ b@ produces 'a' until 'b' doesn’t inhibit anymore.
+(>~) :: Rea t a -> Rea t a -> Rea t a
+a >~ b = Rea $ \t -> case stepRea b t of
+  Just (x,b') -> Just (x,b')
+  Nothing -> do
+    (x,a') <- stepRea a t
+    return (x,a' >~ b)
+
+-- fmap one level deeper!
+(<$$>) :: (Functor f,Functor g) => (a -> b) -> f (g a) -> f (g b)
+(<$$>) = fmap . fmap
