@@ -12,12 +12,35 @@
 module FRP.Reactant where
 
 import Control.Applicative
+import Control.Arrow ( Arrow(..) )
+import Control.Category ( Category(..) )
 import Data.Monoid ( Monoid(..) )
 import Data.Profunctor ( Profunctor(..) )
 import Data.Semigroup ( Semigroup(..) )
+import Prelude hiding ( (.), id )
 
 -- |@Rea t a@ is a /reactive 'a' value that may react to time 't'.
 newtype Rea t a = Rea { stepRea :: t -> Maybe (a,Rea t a) } deriving (Functor)
+
+instance Category Rea where
+  id = now
+  a . b = Rea $ \t -> do
+    (t',bn) <- stepRea b t
+    (ax,an) <- stepRea a t'
+    return (ax,an . bn)
+
+instance Arrow Rea where
+  arr f = let r = Rea $ \t -> return (f t,r) in r
+  first f = recRea
+    where
+      recRea = Rea $ \(t,d) -> do
+        (fx,fn) <- stepRea f t
+        return ((fx,d),recRea)
+
+instance Profunctor Rea where
+  dimap f g r = Rea $ \t -> do
+    (x,n) <- stepRea r (f t)
+    return (g x,dimap f g n)
 
 instance Applicative (Rea t) where
   pure = still
@@ -26,17 +49,21 @@ instance Applicative (Rea t) where
     (x',nx) <- stepRea x t
     return $ (f' x',nf <*> nx)
 
-instance Profunctor Rea where
-  dimap f g r = Rea $ \t -> do
-    (x,n) <- stepRea r (f t)
-    return (g x,dimap f g n)
+instance Semigroup (Rea t a) where
+  a <> b = Rea $ \t -> case stepRea a t of
+    Just (a',an) -> Just (a',an <> b)
+    Nothing -> stepRea b t
+
+instance Monoid (Rea t a) where
+  mempty = dead
+  mappend = (<>)
 
 -- |'still' produces a value that doesn’t react to time and remains still
 -- forever.
 --
 -- Synonym of 'pure'.
 still :: a -> Rea t a
-still a = let r = Rea . const $ return (a,r) in r
+still = arr . const
 
 -- |'dead' is a reactive value that doesn’t react to time and doesn’t carry
 -- any value. It’s then /inhibiting/.
@@ -48,7 +75,7 @@ dead = Rea (const Nothing)
 
 -- |'one a' pulses the value 'a' and inhibit forever.
 one :: a -> Rea t a
-one a = Rea $ \_ -> Just (a,dead)
+one a = pure a <> dead
 
 -- |The identity reactive value. Produces the current time.
 now :: Rea t t
@@ -67,18 +94,11 @@ for a duration = Rea $ \t -> do
 
 -- |'Event t a' is a stream of events occurring at 't' times and carrying 'a'
 -- values.
-newtype Event t a = Event { unEvent :: Rea t a } deriving (Applicative,Functor)
-
-instance Semigroup (Event t a) where
-  (<>) = mergeE
-
-instance Monoid (Event t a) where
-  mempty = never
-  mappend = (<>)
+newtype Event t a = Event { unEvent :: Rea t a } deriving (Applicative,Functor,Semigroup,Monoid)
 
 -- |An event that won’t ever occur.
 never :: Event t a
-never = Event dead
+never = mempty
 
 -- |@always a@ will always occur with 'a' carried.
 always :: a -> Event t a
@@ -87,12 +107,6 @@ always = pure
 -- |Produce an 'Event' that happens only once.
 once :: a -> Event t a
 once = Event . one
-
--- |Merge two events.
-mergeE :: Event t a -> Event t a -> Event t a
-mergeE a b = Event . Rea $ \t -> case stepRea (unEvent a) t of
-  Just (a',an) -> Just (a',unEvent $ mergeE (Event an) b)
-  Nothing -> stepRea (unEvent b) t
 
 -- |Forget the first few events.
 dropE :: Int -> Event t a -> Event t a
