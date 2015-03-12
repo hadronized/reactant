@@ -21,39 +21,40 @@ import Data.Semigroup ( Semigroup(..) )
 import Prelude hiding ( (.), id )
 
 -- |@Rea t a@ is a /reactive 'a' value that may react to time 't'.
-newtype Rea t a = Rea { stepRea :: t -> Maybe (a,Rea t a) } deriving (Functor)
+newtype Rea t a b = Rea { stepRea :: t -> a -> Maybe (b,Rea t a b) } deriving (Functor)
 
-instance Category Rea where
-  id = now
-  a . b = Rea $ \t -> do
-    (t',bn) <- stepRea b t
-    (ax,an) <- stepRea a t'
-    return (ax,an . bn)
+instance Category (Rea t) where
+  id = arr id
+  x . y = Rea $ \t a -> do
+    (yr,yn) <- stepRea y t a
+    (xr,xn) <- stepRea x t yr
+    return (xr,xn . yn)
 
-instance Arrow Rea where
-  arr f = fix $ \r -> Rea $ \t -> return (f t,r)
-  first f = fix $ \r -> Rea $ \(t,d) -> do
-    (fx,fn) <- stepRea f t
-    return ((fx,d),r)
+instance Arrow (Rea t) where
+  arr f = fix $ \r -> Rea $ \_ a -> return (f a,r)
+  first f = fix $ \r -> Rea $ \t (b,c) -> do
+    (fr,fn) <- stepRea f t b
+    return ((fr,c),r)
 
-instance Profunctor Rea where
-  dimap f g r = Rea $ \t -> do
-    (x,n) <- stepRea r (f t)
-    return (g x,dimap f g n)
+instance Profunctor (Rea t) where
+  dimap f g r = Rea $ \t a -> do
+    (rr,rn) <- stepRea r t (f a)
+    return (g rr,dimap f g rn)
 
-instance Applicative (Rea t) where
+instance Applicative (Rea t a) where
   pure = still
-  f <*> x = Rea $ \t -> do
-    (f',nf) <- stepRea f t
-    (x',nx) <- stepRea x t
-    return $ (f' x',nf <*> nx)
+  f <*> x = Rea $ \t a -> do
+    (fr,fn) <- stepRea f t a
+    (xr,xn) <- stepRea x t a
+    return $ (fr xr,fn <*> xn)
 
-instance Semigroup (Rea t a) where
-  a <> b = Rea $ \t -> case stepRea a t of
-    Just (a',an) -> Just (a',an <> b)
-    Nothing -> stepRea b t
+instance (Semigroup b) => Semigroup (Rea t a b) where
+  x <> y = Rea $ \t a -> do
+    (xr,xn) <- stepRea x t a
+    (yr,yn) <- stepRea y t a
+    return $ (xr <> yr,xn <> yn)
 
-instance Monoid (Rea t a) where
+instance (Semigroup b) => Monoid (Rea t a b) where
   mempty = dead
   mappend = (<>)
 
@@ -61,7 +62,7 @@ instance Monoid (Rea t a) where
 -- forever.
 --
 -- Synonym of 'pure'.
-still :: a -> Rea t a
+still :: b -> Rea t a b
 still = arr . const
 
 -- |'dead' is a reactive value that doesn’t react to time and doesn’t carry
@@ -69,35 +70,37 @@ still = arr . const
 --
 -- If you want that reactive value to produce again, you have to 'revive' it.
 -- See 'revive' or '(~>)' for further details.
-dead :: Rea t a
-dead = Rea (const Nothing)
+dead :: Rea t a b
+dead = Rea $ \_ _ -> Nothing
 
 -- |'one a' pulses the value 'a' and inhibit forever.
-one :: a -> Rea t a
-one a = pure a <> dead
+one :: b -> Rea t a b
+one b = Rea $ \_ _ -> Just (b,dead)
 
--- |The identity reactive value. Produces the current time.
-now :: Rea t t
-now = Rea $ return . (,now)
+-- |Produces the current time.
+now :: Rea t a t
+now = Rea $ \t _ -> return (t,now)
 
 -- |Produces the 'a' value for the given period of time. Afterward, it
 -- inhibits forever.
-for :: (Num t,Ord t) => a -> t -> Rea t a
-for a duration = Rea $ \t -> do
-    (start,_) <- stepRea now t
+{-
+for :: (Num t,Ord t) => b -> t -> Rea t a b
+for x duration = Rea $ \t a -> do
+    (start,_) <- stepRea now t a
     stepRea (Rea $ forFrom start) t
   where
     forFrom start t
       | t - start <= duration = Just (a,Rea $ forFrom start)
       | otherwise = Nothing
+-}
 
 -- |'Event t a' is a stream of events occurring at 't' times and carrying 'a'
 -- values.
-newtype Event t a = Event { unEvent :: Rea t a } deriving (Applicative,Functor,Semigroup,Monoid)
+newtype Event t a = Event { unEvent :: Rea t () a } deriving (Applicative,Functor,Semigroup,Monoid)
 
 -- |An event that won’t ever occur.
 never :: Event t a
-never = mempty
+never = Event . Rea $ \_ _ -> Nothing
 
 -- |@always a@ will always occur with 'a' carried.
 always :: a -> Event t a
@@ -110,9 +113,9 @@ once = Event . one
 -- |Forget the first few events.
 dropE :: Int -> Event t a -> Event t a
 dropE 0 e = e
-dropE n e = Event . Rea $ \t -> do
-  (_,en) <- stepRea (unEvent e) t
-  stepRea (unEvent . dropE (pred n) $ Event en) t
+dropE n e = Event . Rea $ \t _ -> do
+  (_,en) <- stepRea (unEvent e) t ()
+  stepRea (unEvent . dropE (pred n) $ Event en) t ()
 
 -- |Forget the first event.
 initE :: Event t a -> Event t a
@@ -122,46 +125,44 @@ initE = dropE 1
 -- the carried value of the 'Event' along with the next 'Event' in the
 -- stream. Otherwise, if no event has occurred, it produces 'Nothing'.
 occurred :: Event t a -> t -> Maybe (a,Event t a)
-occurred e t = Event <$$> stepRea (unEvent e) t
+occurred e t = Event <$$> stepRea (unEvent e) t ()
 
 -- |Build an 'Event' that carries the given value /at/ the given time.
 at :: (Ord t) => a -> t -> Event t a
-at a t = Event (Rea go)
+at v t = Event $ Rea go
   where
-    go t'
-      | t' >= t = Just (a,unEvent never)
+    go t' _
+      | t' >= t = return (v,dead)
       | otherwise = Nothing
 
 -- |Reactive value switch. 'till' takes the initial reactive value and
 -- produces it until the 'Event' occurs, afterwards the reactive value
 -- is switched with the one carried by the 'Event'.
-till :: Rea t a -> Event t (Rea t a) -> Rea t a
-till ini e = Rea go
-  where
-    go t = case occurred e t of
-      Just (next,_) -> stepRea next t
-      Nothing -> do
-        (x,_) <- stepRea ini t
-        return (x,till ini e)
+till :: Rea t a b -> Event t (Rea t a b) -> Rea t a b
+till ini e = fix $ \r -> Rea $ \t a -> case occurred e t of
+  Just (next,_) -> stepRea next t a
+  Nothing -> do
+    (x,_) <- stepRea ini t a
+    return (x,r)
 
 -- |Revive a reactive value. @a ~> b@ will produce 'a' until it starts
 -- /inhibiting/, afterwhile 'b' is used.
-(~>) :: Rea t a -> Rea t a -> Rea t a
-a ~> b = Rea $ \t -> case stepRea a t of
-  Just (x,a') -> Just (x,a' ~> b)
-  Nothing -> stepRea b t
+(~>) :: Rea t a b -> Rea t a b -> Rea t a b
+x ~> y = Rea $ \t a -> case stepRea x t a of
+  Just (r,xn) -> Just (r,xn ~> y)
+  Nothing -> stepRea y t a
 
 -- |Prefix version of '(~>)'.
-revive :: Rea t a -> Rea t a -> Rea t a
+revive :: Rea t a b -> Rea t a b -> Rea t a b
 revive = (~>)
 
 -- |@a >~ b@ produces 'a' until 'b' doesn’t inhibit anymore.
-(>~) :: Rea t a -> Rea t a -> Rea t a
-a >~ b = Rea $ \t -> case stepRea b t of
-  Just (x,b') -> Just (x,b')
+(>~) :: Rea t a b -> Rea t a b -> Rea t a b
+x >~ y = Rea $ \t a -> case stepRea y t a of
+  Just (r,yn) -> Just (r,yn)
   Nothing -> do
-    (x,a') <- stepRea a t
-    return (x,a' >~ b)
+    (r,xn) <- stepRea x t a
+    return (r,xn >~ y)
 
 -- fmap one level deeper!
 (<$$>) :: (Functor f,Functor g) => (a -> b) -> f (g a) -> f (g b)
