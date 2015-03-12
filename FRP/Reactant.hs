@@ -14,6 +14,7 @@ module FRP.Reactant where
 import Control.Applicative
 import Control.Arrow ( Arrow(..) )
 import Control.Category ( Category(..) )
+import Data.Function ( fix )
 import Data.Monoid ( Monoid(..) )
 import Data.Profunctor ( Profunctor(..) )
 import Data.Semigroup ( Semigroup(..) )
@@ -30,12 +31,10 @@ instance Category Rea where
     return (ax,an . bn)
 
 instance Arrow Rea where
-  arr f = let r = Rea $ \t -> return (f t,r) in r
-  first f = recRea
-    where
-      recRea = Rea $ \(t,d) -> do
-        (fx,fn) <- stepRea f t
-        return ((fx,d),recRea)
+  arr f = fix $ \r -> Rea $ \t -> return (f t,r)
+  first f = fix $ \r -> Rea $ \(t,d) -> do
+    (fx,fn) <- stepRea f t
+    return ((fx,d),r)
 
 instance Profunctor Rea where
   dimap f g r = Rea $ \t -> do
