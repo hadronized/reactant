@@ -1,169 +1,196 @@
--- |@Rea t a@ is a /reactive/ 'a' value that may react to time 't'. If it
--- doesn’t react to time, it’s considered as /inhibiting/ – see 'dead'.
---
--- Inhibiting is used when a reactive value is not responding to time anymore.
--- You can make it respond again by *reviving* it – see 'revive' or '(~>)'.
---
--- 'Event t a' represents an /event stream/. Each event has an occurrence in
--- time and can be reacted to. The simplest kind of reaction is to use them as
--- behavior switches. You use a 'Rea t a' reactive value and switch to another
--- 'Rea t a' reactive value when the given event occurs – see 'till'.
+module FRP.Reactant (
+    -- * Automatons
+    Auto(..)
+  , liftTA
+  , liftT
+  , liftFixTA
+  , liftFixT
+  , time
+  , filterE
+  , mute
+  , for
+  , after
+  , at
+  , when
+  , unless
+  , (~>)
+  , (>~)
+  , until 
+    -- * Testing
+  , stdinTest
+    -- * Re-exported modules
+  , module Control.Arrow
+  , module Control.Category
+  , module Data.Profunctor
+  , module Data.Semigroup
+  ) where
 
-module FRP.Reactant where
-
-import Control.Applicative
+import Control.Applicative ( Applicative(..), liftA2 )
 import Control.Arrow ( Arrow(..) )
 import Control.Category ( Category(..) )
+import Control.Monad ( guard )
+import qualified Control.Monad as M ( unless )
 import Data.Function ( fix )
-import Data.Monoid ( Monoid(..) )
 import Data.Profunctor ( Profunctor(..) )
+import Data.Monoid ( Monoid(..) )
 import Data.Semigroup ( Semigroup(..) )
-import Prelude hiding ( (.), id )
+import Data.String ( IsString(..) )
+import Prelude hiding ( (.), id, until )
 
--- |@Rea t a@ is a /reactive 'a' value that may react to time 't'.
-newtype Rea t a b = Rea { stepRea :: t -> a -> Maybe (b,Rea t a b) } deriving (Functor)
+-- |@Auto t a m b@ is a signal automaton from 'a' to 'b' consuming time 't'.
+newtype Auto t a b = Auto { runAuto :: t -> a -> (Maybe b,Auto t a b) }
 
-instance Category (Rea t) where
+instance Applicative (Auto t a) where
+  pure b = arr (const b)
+  Auto f <*> Auto x = Auto $ \t a ->
+    let
+      (f',nf) = f t a
+      (x',nx) = x t a
+    in (f' <*> x',nf <*> nx)
+
+instance Arrow (Auto t) where
+  arr f = fix $ \r -> Auto $ \t a -> (Just $ f a,r)
+  first (Auto f) = Auto $ \t (a,b) -> let (f',nf) = f t a in (fmap (,b) f',first nf)
+  second (Auto f) = Auto $ \t (a,b) -> let (f',nf) = f t b in (fmap (a,) f',second nf)
+
+instance Category (Auto t) where
   id = arr id
-  x . y = Rea $ \t a -> do
-    (yr,yn) <- stepRea y t a
-    (xr,xn) <- stepRea x t yr
-    return (xr,xn . yn)
+  x@(Auto g) . Auto f = Auto $ \t a ->
+    let (f',nf) = f t a in case f' of
+      Just f'' -> fmap (. nf) $ g t f''
+      Nothing -> (Nothing,x . nf)
 
-instance Arrow (Rea t) where
-  arr f = fix $ \r -> Rea $ \_ a -> return (f a,r)
-  first f = fix $ \r -> Rea $ \t (b,c) -> do
-    (fr,fn) <- stepRea f t b
-    return ((fr,c),r)
+instance Functor (Auto t a) where
+  fmap f (Auto x) = Auto $ \t a -> let (xr,nx) = x t a in (fmap f xr,fmap f nx)
 
-instance Profunctor (Rea t) where
-  dimap f g r = Rea $ \t a -> do
-    (rr,rn) <- stepRea r t (f a)
-    return (g rr,dimap f g rn)
+instance (IsString b) => IsString (Auto t a b) where
+  fromString = pure . fromString
 
-instance Applicative (Rea t a) where
-  pure = still
-  f <*> x = Rea $ \t a -> do
-    (fr,fn) <- stepRea f t a
-    (xr,xn) <- stepRea x t a
-    return $ (fr xr,fn <*> xn)
-
-instance (Semigroup b) => Semigroup (Rea t a b) where
-  x <> y = Rea $ \t a -> do
-    (xr,xn) <- stepRea x t a
-    (yr,yn) <- stepRea y t a
-    return $ (xr <> yr,xn <> yn)
-
-instance (Semigroup b) => Monoid (Rea t a b) where
-  mempty = dead
+-- TODO: remove the Semigroup constraint when possible
+instance (Monoid b,Semigroup b) => Monoid (Auto t a b) where
+  mempty = mute
   mappend = (<>)
 
--- |'still' produces a value that doesn’t react to time and remains still
+instance (Num b) => Num (Auto t a b) where
+  (+) = liftA2 (+)
+  (-) = liftA2 (-)
+  (*) = liftA2 (*)
+  negate = fmap negate
+  abs = fmap abs
+  signum = fmap signum
+  fromInteger = pure . fromInteger
+
+instance Profunctor (Auto t) where
+  dimap l r (Auto x) = Auto $ \t a -> let (xr,nx) = x t (l a) in (fmap r xr,dimap l r nx)
+
+instance (Semigroup b) => Semigroup (Auto t a b) where
+  Auto x <> Auto y = Auto $ \t a ->
+    let
+      (x',nx) = x t a
+      (y',ny) = y t a
+    in (x' <> y',nx <> ny)
+
+-- |Lift a time-aware pure function into @Auto t a b@.
+liftTA :: (t -> a -> b) -> Auto t a b
+liftTA f = liftFixTA $ \t a -> Just $ f t a
+
+-- |Lift a time function into @Auto t a b@. Discard 'a'.
+liftT :: (t -> b) -> Auto t a b
+liftT f = liftFixT $ Just . f
+
+-- |Lift a fixed time-aware pure function into @Auto t a b@.
+liftFixTA :: (t -> a -> Maybe b) -> Auto t a b
+liftFixTA f = fix $ \r -> Auto $ \t a -> (f t a,r)
+
+-- |Lift a fixed time pure function into @Auto t a b@.
+liftFixT :: (t -> Maybe b) -> Auto t a b
+liftFixT f = fix $ \r -> Auto $ \t _ -> (f t,r)
+
+-- |Monotonic time, which is 0 when the 'Auto' starts to produce and goes on
+-- infinitely. If you need the absolute time of the simulation, consider
+-- using 'atime'.
+time :: (Num t) => Auto t a t
+time = Auto $ \t a -> runAuto (liftT $ \t' -> t' - t) t a
+
+-- |Absolute time.
+atime :: Auto t a t
+atime = liftT id
+
+filterE :: (b -> Bool) -> Auto t (Maybe b) (Maybe b)
+filterE p = arr $ \m -> do
+  b <- m
+  guard (p b)
+  pure b
+
+-- |Inhibit forever.
+mute :: Auto t a b
+mute = liftFixT $ const Nothing
+
+-- |Produce for a given period of time then inhibit forever.
+for :: (Num t,Ord t) => t -> Auto t a a
+for dur = Auto $ \t a -> runAuto (go t) t a
+  where
+    go t = liftFixTA $ \t' a -> if t' - t < dur then Just a else Nothing
+
+-- |Inhibit for a given period of time, then produce for ever.
+after :: (Num t,Ord t) => t -> Auto t a a
+after dur = Auto $ \t a -> runAuto (go t) t a
+  where
+    go t = liftFixTA $ \t' a -> if t' - t <= dur then Nothing else Just a
+
+-- |Produce only at the given time.
+--
+-- You may not want to use a simple floating type with 'at' because of
+-- rounding error. Consider using a wrapper that implements 'Eq' with
+-- epsilon-biased comparison.
+at :: (Eq t) => t -> Auto t a a
+at atT = liftFixTA $ \t a -> if t == atT then Just a else Nothing
+
+-- |@when p@ behave as 'id' when the 'p' predicate is true. inhibits
+-- otherwise.
+when :: (a -> Bool) -> Auto t a a
+when p = liftFixTA $ \_ a -> guard (p a) >> pure a
+
+-- |@unless p@ behave as 'id' unless the 'p' predicate is true. Inhibits
+-- otherwise.
+unless :: (a -> Bool) -> Auto t a a
+unless = when . (not .)
+
+-- |@x ~> y@ produces with 'y' until it stops producing, then it uses 'y'
 -- forever.
---
--- Synonym of 'pure'.
-still :: b -> Rea t a b
-still = arr . const
+infixr 6 ~>
+(~>) :: Auto t a b -> Auto t a b -> Auto t a b
+Auto x ~> y =
+  Auto $ \t a -> let (x',nx) = x t a in maybe (runAuto y t a) (const $ (x',nx ~> y)) x'
 
--- |'dead' is a reactive value that doesn’t react to time and doesn’t carry
--- any value. It’s then /inhibiting/.
---
--- If you want that reactive value to produce again, you have to 'revive' it.
--- See 'revive' or '(~>)' for further details.
-dead :: Rea t a b
-dead = Rea $ \_ _ -> Nothing
+-- |@x >~ y@ produces with 'x' until 'y' starts producing, no matter whether 'x'
+-- inhibits.
+(>~) :: Auto t a b -> Auto t a b -> Auto t a b
+Auto x >~ Auto y =
+  Auto $ \t a ->
+    let
+      (x',nx) = x t a
+      (y',ny) = y t a
+    in case y' of
+      Just _ -> (y',ny)
+      Nothing -> (x',nx ~> ny)
 
--- |'one a' pulses the value 'a' and inhibit forever.
-one :: b -> Rea t a b
-one b = Rea $ \_ _ -> Just (b,dead)
-
--- |Produces the current time.
-now :: Rea t a t
-now = Rea $ \t _ -> return (t,now)
-
--- |Produces the 'a' value for the given period of time. Afterward, it
+-- |'until' produces with 'a' until its event @Maybe b@ occurs. When so,
 -- inhibits forever.
-{-
-for :: (Num t,Ord t) => b -> t -> Rea t a b
-for x duration = Rea $ \t a -> do
-    (start,_) <- stepRea now t a
-    stepRea (Rea $ forFrom start) t
+until :: Auto t (a,Maybe b) a
+until = fix $ \r -> Auto $ \t (a,b) ->
+  maybe (Just a,r) (const $ runAuto mute t (a,b)) b
+
+-- |Test a @(Read a,Show b,Num t) => Auto t a b@ by providing input via
+-- /stdin/ and outputing results on stdout.
+stdinTest :: (Read a,Show b,Num t) => (t -> t) -> Auto t a b -> IO ()
+stdinTest incr initial = go initial 0
   where
-    forFrom start t
-      | t - start <= duration = Just (a,Rea $ forFrom start)
-      | otherwise = Nothing
--}
-
--- |'Event t a' is a stream of events occurring at 't' times and carrying 'a'
--- values.
-newtype Event t a = Event { unEvent :: Rea t () a } deriving (Applicative,Functor,Semigroup,Monoid)
-
--- |An event that won’t ever occur.
-never :: Event t a
-never = Event . Rea $ \_ _ -> Nothing
-
--- |@always a@ will always occur with 'a' carried.
-always :: a -> Event t a
-always = pure
-
--- |Produce an 'Event' that happens only once.
-once :: a -> Event t a
-once = Event . one
-
--- |Forget the first few events.
-dropE :: Int -> Event t a -> Event t a
-dropE 0 e = e
-dropE n e = Event . Rea $ \t _ -> do
-  (_,en) <- stepRea (unEvent e) t ()
-  stepRea (unEvent . dropE (pred n) $ Event en) t ()
-
--- |Forget the first event.
-initE :: Event t a -> Event t a
-initE = dropE 1
-
--- |Check whether an 'Event' has happened yet. If so, @occurred e t@ gives
--- the carried value of the 'Event' along with the next 'Event' in the
--- stream. Otherwise, if no event has occurred, it produces 'Nothing'.
-occurred :: Event t a -> t -> Maybe (a,Event t a)
-occurred e t = Event <$$> stepRea (unEvent e) t ()
-
--- |Build an 'Event' that carries the given value /at/ the given time.
-at :: (Ord t) => a -> t -> Event t a
-at v t = Event $ Rea go
-  where
-    go t' _
-      | t' >= t = return (v,dead)
-      | otherwise = Nothing
-
--- |Reactive value switch. 'till' takes the initial reactive value and
--- produces it until the 'Event' occurs, afterwards the reactive value
--- is switched with the one carried by the 'Event'.
-till :: Rea t a b -> Event t (Rea t a b) -> Rea t a b
-till ini e = fix $ \r -> Rea $ \t a -> case occurred e t of
-  Just (next,_) -> stepRea next t a
-  Nothing -> do
-    (x,_) <- stepRea ini t a
-    return (x,r)
-
--- |Revive a reactive value. @a ~> b@ will produce 'a' until it starts
--- /inhibiting/, afterwhile 'b' is used.
-(~>) :: Rea t a b -> Rea t a b -> Rea t a b
-x ~> y = Rea $ \t a -> case stepRea x t a of
-  Just (r,xn) -> Just (r,xn ~> y)
-  Nothing -> stepRea y t a
-
--- |Prefix version of '(~>)'.
-revive :: Rea t a b -> Rea t a b -> Rea t a b
-revive = (~>)
-
--- |@a >~ b@ produces 'a' until 'b' doesn’t inhibit anymore.
-(>~) :: Rea t a b -> Rea t a b -> Rea t a b
-x >~ y = Rea $ \t a -> case stepRea y t a of
-  Just (r,yn) -> Just (r,yn)
-  Nothing -> do
-    (r,xn) <- stepRea x t a
-    return (r,xn >~ y)
-
--- fmap one level deeper!
-(<$$>) :: (Functor f,Functor g) => (a -> b) -> f (g a) -> f (g b)
-(<$$>) = fmap . fmap
+    go x t = do
+      rawInput <- fmap reads getLine
+      M.unless (null rawInput) $ do
+        let
+          [(input,_)] = rawInput
+          (x',nx) = runAuto x t input
+        print x'
+        go nx (incr t)
